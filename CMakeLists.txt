@@ -17,7 +17,9 @@ add_library(
     src/arp.c
     src/ipv4.c
     src/icmp.c
+    src/netdev_linux.c
 )
+
 
 
 target_include_directories(
@@ -222,4 +224,25 @@ target_compile_options(
 add_test(
     NAME icmp_ipv4_ethernet
     COMMAND test_icmp_ipv4_ethernet
+)
+# BLACKTERM // NETSTACK live ping utility
+add_executable(
+    netstack_ping
+    tools/netstack_ping.c
+)
+
+target_link_libraries(
+    netstack_ping
+    PRIVATE
+    blackterm_netstack
+)
+
+target_compile_options(
+    netstack_ping
+    PRIVATE
+    -Wall
+    -Wextra
+    -Wpedantic
+    -Wconversion
+    -Wshadow
 )
