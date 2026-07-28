@@ -15,11 +15,6 @@ typedef struct {
     size_t body_len;
 } http_response_t;
 
-/*
- * Build a basic HTTP/1.1 GET request.
- *
- * Returns number of bytes written or 0 on failure.
- */
 size_t http_build_get_request(
     char *buffer,
     size_t buffer_len,
@@ -27,19 +22,51 @@ size_t http_build_get_request(
     const char *path
 );
 
-/*
- * Parse an HTTP response already stored in memory.
- *
- * Returns:
- *   0 success
- *  -1 invalid arguments
- *  -2 malformed status line
- *  -3 incomplete headers
- */
 int http_parse_response(
     const char *data,
     size_t data_len,
     http_response_t *response
+);
+
+/*
+ * Detect whether the response headers contain:
+ *
+ * Transfer-Encoding: chunked
+ *
+ * Returns:
+ *   1 chunked
+ *   0 not chunked
+ *  -1 invalid arguments
+ */
+int http_response_is_chunked(
+    const char *data,
+    size_t header_len
+);
+
+/*
+ * Decode an HTTP/1.1 chunked body.
+ *
+ * Example:
+ *
+ * 4\r\n
+ * Wiki\r\n
+ * 5\r\n
+ * pedia\r\n
+ * 0\r\n
+ * \r\n
+ *
+ * becomes:
+ *
+ * Wikipedia
+ *
+ * Returns decoded length on success.
+ * Returns 0 on failure.
+ */
+size_t http_decode_chunked_body(
+    const char *input,
+    size_t input_len,
+    char *output,
+    size_t output_len
 );
 
 #endif
