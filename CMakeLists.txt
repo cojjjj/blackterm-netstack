@@ -20,6 +20,8 @@ add_library(
     src/netdev_linux.c
     src/udp.c
     src/dns.c
+    src/tcp.c
+
 
 )
 
@@ -317,6 +319,53 @@ target_link_libraries(
 
 target_compile_options(
     netstack_dns
+    PRIVATE
+    -Wall
+    -Wextra
+    -Wpedantic
+    -Wconversion
+    -Wshadow
+)
+# TCP core tests
+add_executable(
+    test_tcp
+    tests/test_tcp.c
+)
+
+target_link_libraries(
+    test_tcp
+    PRIVATE
+    blackterm_netstack
+)
+
+target_compile_options(
+    test_tcp
+    PRIVATE
+    -Wall
+    -Wextra
+    -Wpedantic
+    -Wconversion
+    -Wshadow
+)
+
+add_test(
+    NAME tcp
+    COMMAND test_tcp
+)
+# Live TCP handshake utility
+add_executable(
+    netstack_tcp
+    tools/netstack_tcp.c
+)
+
+target_link_libraries(
+    netstack_tcp
+    PRIVATE
+    blackterm_netstack
+)
+
+target_compile_options(
+    netstack_tcp
     PRIVATE
     -Wall
     -Wextra
