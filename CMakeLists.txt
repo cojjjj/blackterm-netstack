@@ -143,3 +143,29 @@ add_test(
     NAME ipv4
     COMMAND test_ipv4
 )
+# Ethernet + IPv4 integration tests
+add_executable(
+    test_ipv4_ethernet
+    tests/test_ipv4_ethernet.c
+)
+
+target_link_libraries(
+    test_ipv4_ethernet
+    PRIVATE
+    blackterm_netstack
+)
+
+target_compile_options(
+    test_ipv4_ethernet
+    PRIVATE
+    -Wall
+    -Wextra
+    -Wpedantic
+    -Wconversion
+    -Wshadow
+)
+
+add_test(
+    NAME ipv4_ethernet
+    COMMAND test_ipv4_ethernet
+)
