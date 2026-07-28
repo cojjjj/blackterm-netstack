@@ -16,7 +16,9 @@ add_library(
     src/ethernet.c
     src/arp.c
     src/ipv4.c
+    src/icmp.c
 )
+
 
 target_include_directories(
     blackterm_netstack
@@ -168,4 +170,30 @@ target_compile_options(
 add_test(
     NAME ipv4_ethernet
     COMMAND test_ipv4_ethernet
+)
+# ICMP tests
+add_executable(
+    test_icmp
+    tests/test_icmp.c
+)
+
+target_link_libraries(
+    test_icmp
+    PRIVATE
+    blackterm_netstack
+)
+
+target_compile_options(
+    test_icmp
+    PRIVATE
+    -Wall
+    -Wextra
+    -Wpedantic
+    -Wconversion
+    -Wshadow
+)
+
+add_test(
+    NAME icmp
+    COMMAND test_icmp
 )
