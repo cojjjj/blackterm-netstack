@@ -18,7 +18,9 @@ add_library(
     src/ipv4.c
     src/icmp.c
     src/netdev_linux.c
+    src/udp.c
 )
+
 
 
 
@@ -245,4 +247,30 @@ target_compile_options(
     -Wpedantic
     -Wconversion
     -Wshadow
+)
+# UDP tests
+add_executable(
+    test_udp
+    tests/test_udp.c
+)
+
+target_link_libraries(
+    test_udp
+    PRIVATE
+    blackterm_netstack
+)
+
+target_compile_options(
+    test_udp
+    PRIVATE
+    -Wall
+    -Wextra
+    -Wpedantic
+    -Wconversion
+    -Wshadow
+)
+
+add_test(
+    NAME udp
+    COMMAND test_udp
 )
