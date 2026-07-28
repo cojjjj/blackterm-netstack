@@ -30,6 +30,8 @@
 #define HTTP_RESPONSE_INITIAL_CAPACITY 8192
 #define HTTP_RESPONSE_MAX_SIZE (1024U * 1024U)
 
+#define TCP_APP_READ_BUFFER 4096
+
 static void print_ipv4(
     const uint8_t ip[IPV4_ADDR_LEN]
 )
@@ -121,7 +123,9 @@ static int resolve_arp(
         return -1;
     }
 
-    uint8_t arp_bytes[ARP_PACKET_LEN];
+    uint8_t arp_bytes[
+        ARP_PACKET_LEN
+    ];
 
     size_t arp_len =
         arp_serialize(
@@ -220,7 +224,8 @@ static int resolve_arp(
             elapsed_ms(
                 &start,
                 &now
-            ) > ARP_TIMEOUT_MS
+            ) >
+            ARP_TIMEOUT_MS
         ) {
             fprintf(
                 stderr,
@@ -474,7 +479,8 @@ static int receive_tcp_segment(
             elapsed_ms(
                 &start,
                 &now
-            ) > timeout_ms
+            ) >
+            timeout_ms
         ) {
             return 0;
         }
@@ -691,9 +697,9 @@ static int append_response(
 
             if (
                 new_capacity <
-                required &&
+                    required &&
                 new_capacity ==
-                HTTP_RESPONSE_MAX_SIZE
+                    HTTP_RESPONSE_MAX_SIZE
             ) {
                 return -1;
             }
@@ -735,6 +741,61 @@ static int append_response(
     return 0;
 }
 
+static int drain_tcp_application_data(
+    tcp_connection_t *connection,
+    char **response_data,
+    size_t *response_len,
+    size_t *response_capacity
+)
+{
+    uint8_t buffer[
+        TCP_APP_READ_BUFFER
+    ];
+
+    while (
+        tcp_connection_readable(
+            connection
+        ) > 0
+    ) {
+        size_t read_len =
+            tcp_connection_read(
+                connection,
+                buffer,
+                sizeof(buffer)
+            );
+
+        if (
+            read_len == 0
+        ) {
+            break;
+        }
+
+        if (
+            append_response(
+                response_data,
+                response_len,
+                response_capacity,
+                buffer,
+                read_len
+            ) != 0
+        ) {
+            return -1;
+        }
+
+        printf(
+            "TCP  DELIVER      bytes=%zu total=%zu ack=%u queued=%zu\n",
+            read_len,
+            *response_len,
+            connection->receive_next,
+            tcp_connection_reassembly_count(
+                connection
+            )
+        );
+    }
+
+    return 0;
+}
+
 static int print_http_response(
     const char *response_data,
     size_t response_len
@@ -763,7 +824,9 @@ static int print_http_response(
             response.header_len
         );
 
-    if (chunked < 0) {
+    if (
+        chunked < 0
+    ) {
         return -1;
     }
 
@@ -1049,7 +1112,7 @@ static int connect_tcp(
             retransmit_result == 1
         ) {
             printf(
-                "TCP  RETRANSMIT    %s seq=%u retry=%u rto=%u ms\n",
+                "TCP  RETRANSMIT   %s seq=%u retry=%u rto=%u ms\n",
                 tcp_state_flag_name(
                     retransmit.flags
                 ),
@@ -1099,10 +1162,6 @@ static int run_http(
     ) {
         return -1;
     }
-
-    /*
-     * HTTP request construction.
-     */
 
     char request[
         HTTP_MAX_REQUEST_LEN
@@ -1248,13 +1307,6 @@ static int run_http(
         if (
             receive_result == 0
         ) {
-            /*
-             * No packet arrived.
-             *
-             * Let the reusable TCP engine decide whether
-             * outstanding SYN/data/FIN needs retransmission.
-             */
-
             tcp_segment_t retransmit;
 
             int retransmit_result =
@@ -1281,7 +1333,7 @@ static int run_http(
                 retransmit_result == 1
             ) {
                 printf(
-                    "TCP  RETRANSMIT    %s seq=%u retry=%u\n",
+                    "TCP  RETRANSMIT   %s seq=%u retry=%u\n",
                     tcp_state_flag_name(
                         retransmit.flags
                     ),
@@ -1310,10 +1362,11 @@ static int run_http(
             (incoming.flags &
             TCP_FLAG_RST) != 0
         ) {
-            (void)tcp_connection_on_segment(
-                &connection,
-                &incoming
-            );
+            (void)
+                tcp_connection_on_segment(
+                    &connection,
+                    &incoming
+                );
 
             fprintf(
                 stderr,
@@ -1325,24 +1378,13 @@ static int run_http(
             return -1;
         }
 
-        /*
-         * Save the receive edge before the state machine
-         * processes this segment.
-         *
-         * That lets the application know whether this
-         * payload was contiguous, duplicate, or ahead of us.
-         */
-
         uint32_t expected_before =
             connection.receive_next;
 
-        uint32_t segment_start =
-            incoming.sequence_number;
-
-        uint32_t segment_end =
-            segment_start +
-            (uint32_t)
-            incoming.payload_len;
+        size_t queue_before =
+            tcp_connection_reassembly_count(
+                &connection
+            );
 
         tcp_connection_state_t state_before =
             connection.state;
@@ -1354,77 +1396,113 @@ static int run_http(
             );
 
         if (
-            state_result < 0
+            state_result == -2
         ) {
-            /*
-             * Wrong/invalid segment for this connection.
-             */
-            continue;
+            fprintf(
+                stderr,
+                "TCP receive/reassembly capacity exhausted.\n"
+            );
+
+            free(response_data);
+
+            return -1;
         }
 
         if (
-            incoming.payload_len >
-            0
+            state_result < 0
+        ) {
+            continue;
+        }
+
+        size_t queue_after =
+            tcp_connection_reassembly_count(
+                &connection
+            );
+
+        /*
+         * Diagnostic only.
+         *
+         * Reassembly policy is owned entirely by tcp_connection_t.
+         */
+        if (
+            incoming.payload_len > 0
         ) {
             if (
-                segment_start ==
+                incoming.sequence_number >
                 expected_before
             ) {
-                /*
-                 * The state machine advanced receive_next,
-                 * so this payload was contiguous.
-                 */
-
-                if (
-                    append_response(
-                        &response_data,
-                        &response_len,
-                        &response_capacity,
-                        incoming.payload,
-                        incoming.payload_len
-                    ) != 0
-                ) {
-                    fprintf(
-                        stderr,
-                        "HTTP response too large.\n"
-                    );
-
-                    free(response_data);
-
-                    return -1;
-                }
-
                 printf(
-                    "TCP  DATA         seq=%u bytes=%zu total=%zu ack=%u\n",
-                    segment_start,
+                    "TCP  BUFFER       seq=%u expected=%u bytes=%zu queue=%zu\n",
+                    incoming.sequence_number,
+                    expected_before,
                     incoming.payload_len,
-                    response_len,
-                    connection.receive_next
+                    queue_after
                 );
             } else if (
-                segment_end <=
-                expected_before
+                incoming.sequence_number <
+                    expected_before &&
+                connection.receive_next ==
+                    expected_before
             ) {
                 printf(
                     "TCP  DUPLICATE    seq=%u bytes=%zu ack=%u\n",
-                    segment_start,
+                    incoming.sequence_number,
                     incoming.payload_len,
                     connection.receive_next
                 );
-            } else {
-                printf(
-                    "TCP  OUT-OF-ORDER seq=%u expected=%u bytes=%zu\n",
-                    segment_start,
-                    expected_before,
-                    incoming.payload_len
-                );
             }
 
-            /*
-             * ACK the highest contiguous sequence number
-             * known to tcp_connection_t.
-             */
+            if (
+                queue_after <
+                queue_before
+            ) {
+                printf(
+                    "TCP  REASSEMBLE   promoted=%zu ack=%u\n",
+                    queue_before -
+                    queue_after,
+                    connection.receive_next
+                );
+            }
+        }
 
+        /*
+         * Drain whatever the TCP engine now considers contiguous.
+         *
+         * This may include:
+         *
+         * - the current segment
+         * - clipped overlap bytes
+         * - one or several previously buffered segments
+         */
+        if (
+            drain_tcp_application_data(
+                &connection,
+                &response_data,
+                &response_len,
+                &response_capacity
+            ) != 0
+        ) {
+            fprintf(
+                stderr,
+                "HTTP response too large.\n"
+            );
+
+            free(response_data);
+
+            return -1;
+        }
+
+        /*
+         * ACK after every payload/FIN-bearing segment.
+         *
+         * receive_next already represents the highest contiguous
+         * sequence edge after reassembly.
+         */
+        if (
+            incoming.payload_len > 0 ||
+            (incoming.flags &
+            TCP_FLAG_FIN) != 0
+        ) {
             if (
                 send_connection_ack(
                     dev,
@@ -1438,11 +1516,6 @@ static int run_http(
                 return -1;
             }
         }
-
-        /*
-         * A FIN may have moved the connection from
-         * ESTABLISHED -> CLOSE-WAIT.
-         */
 
         if (
             state_before !=
@@ -1458,51 +1531,36 @@ static int run_http(
                 )
             );
 
-            if (
-                send_connection_ack(
-                    dev,
-                    target_ip,
-                    next_hop_mac,
-                    &connection
-                ) != 0
-            ) {
-                free(response_data);
-
-                return -1;
-            }
-
             remote_closed =
                 1;
         } else if (
             (incoming.flags &
-            TCP_FLAG_FIN) != 0
+            TCP_FLAG_FIN) != 0 &&
+            connection.pending_fin
         ) {
-            /*
-             * FIN was seen but could not be consumed because
-             * bytes before it are missing.
-             */
-
             printf(
                 "TCP  FIN PENDING   seq=%u expected=%u\n",
-                incoming.sequence_number +
-                (uint32_t)
-                incoming.payload_len,
+                connection.pending_fin_sequence,
                 connection.receive_next
             );
-
-            if (
-                send_connection_ack(
-                    dev,
-                    target_ip,
-                    next_hop_mac,
-                    &connection
-                ) != 0
-            ) {
-                free(response_data);
-
-                return -1;
-            }
         }
+    }
+
+    /*
+     * One final drain in case reassembly promotion occurred on the
+     * segment that also completed connection close.
+     */
+    if (
+        drain_tcp_application_data(
+            &connection,
+            &response_data,
+            &response_len,
+            &response_capacity
+        ) != 0
+    ) {
+        free(response_data);
+
+        return -1;
     }
 
     if (
@@ -1529,16 +1587,6 @@ static int run_http(
         return -1;
     }
 
-    /*
-     * Server performed active close:
-     *
-     * ESTABLISHED -> CLOSE-WAIT
-     *
-     * Now we send our FIN:
-     *
-     * CLOSE-WAIT -> LAST-ACK
-     */
-
     if (
         connection.state ==
         TCP_STATE_CLOSE_WAIT
@@ -1561,12 +1609,13 @@ static int run_http(
                 )
             );
 
-            (void)send_tcp_segment(
-                dev,
-                target_ip,
-                next_hop_mac,
-                &fin
-            );
+            (void)
+                send_tcp_segment(
+                    dev,
+                    target_ip,
+                    next_hop_mac,
+                    &fin
+                );
         }
     }
 
