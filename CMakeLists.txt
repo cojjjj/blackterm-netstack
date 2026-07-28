@@ -21,9 +21,11 @@ add_library(
     src/udp.c
     src/dns.c
     src/tcp.c
-
-
+    src/http.c
 )
+
+
+
 
 
 
@@ -366,6 +368,54 @@ target_link_libraries(
 
 target_compile_options(
     netstack_tcp
+    PRIVATE
+    -Wall
+    -Wextra
+    -Wpedantic
+    -Wconversion
+    -Wshadow
+)
+# HTTP tests
+add_executable(
+    test_http
+    tests/test_http.c
+)
+
+target_link_libraries(
+    test_http
+    PRIVATE
+    blackterm_netstack
+)
+
+target_compile_options(
+    test_http
+    PRIVATE
+    -Wall
+    -Wextra
+    -Wpedantic
+    -Wconversion
+    -Wshadow
+)
+
+add_test(
+    NAME http
+    COMMAND test_http
+)
+
+# Live HTTP client
+add_executable(
+    netstack_http
+    tools/netstack_http.c
+)
+
+target_link_libraries(
+    netstack_http
+    PRIVATE
+    blackterm_netstack
+)
+
+target_compile_options(
+    netstack_http
     PRIVATE
     -Wall
     -Wextra
