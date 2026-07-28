@@ -19,6 +19,8 @@ add_library(
     src/icmp.c
     src/netdev_linux.c
     src/udp.c
+    src/dns.c
+
 )
 
 
@@ -273,4 +275,52 @@ target_compile_options(
 add_test(
     NAME udp
     COMMAND test_udp
+)
+# DNS tests
+add_executable(
+    test_dns
+    tests/test_dns.c
+)
+
+target_link_libraries(
+    test_dns
+    PRIVATE
+    blackterm_netstack
+)
+
+target_compile_options(
+    test_dns
+    PRIVATE
+    -Wall
+    -Wextra
+    -Wpedantic
+    -Wconversion
+    -Wshadow
+)
+
+add_test(
+    NAME dns
+    COMMAND test_dns
+)
+
+# Live DNS client
+add_executable(
+    netstack_dns
+    tools/netstack_dns.c
+)
+
+target_link_libraries(
+    netstack_dns
+    PRIVATE
+    blackterm_netstack
+)
+
+target_compile_options(
+    netstack_dns
+    PRIVATE
+    -Wall
+    -Wextra
+    -Wpedantic
+    -Wconversion
+    -Wshadow
 )
