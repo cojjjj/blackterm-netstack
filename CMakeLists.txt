@@ -197,3 +197,29 @@ add_test(
     NAME icmp
     COMMAND test_icmp
 )
+# Ethernet + IPv4 + ICMP integration tests
+add_executable(
+    test_icmp_ipv4_ethernet
+    tests/test_icmp_ipv4_ethernet.c
+)
+
+target_link_libraries(
+    test_icmp_ipv4_ethernet
+    PRIVATE
+    blackterm_netstack
+)
+
+target_compile_options(
+    test_icmp_ipv4_ethernet
+    PRIVATE
+    -Wall
+    -Wextra
+    -Wpedantic
+    -Wconversion
+    -Wshadow
+)
+
+add_test(
+    NAME icmp_ipv4_ethernet
+    COMMAND test_icmp_ipv4_ethernet
+)
