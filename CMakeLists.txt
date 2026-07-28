@@ -86,3 +86,28 @@ add_test(
     NAME arp
     COMMAND test_arp
 )
+add_executable(
+    test_arp_ethernet
+    tests/test_arp_ethernet.c
+)
+
+target_link_libraries(
+    test_arp_ethernet
+    PRIVATE
+    blackterm_netstack
+)
+
+target_compile_options(
+    test_arp_ethernet
+    PRIVATE
+    -Wall
+    -Wextra
+    -Wpedantic
+    -Wconversion
+    -Wshadow
+)
+
+add_test(
+    NAME arp_ethernet
+    COMMAND test_arp_ethernet
+)
