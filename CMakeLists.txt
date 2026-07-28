@@ -21,7 +21,9 @@ add_library(
     src/udp.c
     src/dns.c
     src/tcp.c
+    src/tcp_connection.c
     src/http.c
+
 )
 
 
@@ -422,4 +424,30 @@ target_compile_options(
     -Wpedantic
     -Wconversion
     -Wshadow
+)
+# TCP connection/state-machine tests
+add_executable(
+    test_tcp_connection
+    tests/test_tcp_connection.c
+)
+
+target_link_libraries(
+    test_tcp_connection
+    PRIVATE
+    blackterm_netstack
+)
+
+target_compile_options(
+    test_tcp_connection
+    PRIVATE
+    -Wall
+    -Wextra
+    -Wpedantic
+    -Wconversion
+    -Wshadow
+)
+
+add_test(
+    NAME tcp_connection
+    COMMAND test_tcp_connection
 )

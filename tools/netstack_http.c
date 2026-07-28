@@ -6,6 +6,7 @@
 #include "ipv4.h"
 #include "netdev.h"
 #include "tcp.h"
+#include "tcp_connection.h"
 
 #include <arpa/inet.h>
 #include <stdint.h>
@@ -17,8 +18,9 @@
 #define RECEIVE_BUFFER_SIZE 2048
 
 #define ARP_TIMEOUT_MS 3000
-#define TCP_TIMEOUT_MS 5000
-#define HTTP_TIMEOUT_MS 10000
+#define TCP_POLL_MS 250
+#define TCP_CONNECT_TIMEOUT_MS 10000
+#define HTTP_TIMEOUT_MS 15000
 
 #define HTTP_SOURCE_PORT 40001
 #define HTTP_DESTINATION_PORT 80
@@ -218,8 +220,7 @@ static int resolve_arp(
             elapsed_ms(
                 &start,
                 &now
-            ) >
-            ARP_TIMEOUT_MS
+            ) > ARP_TIMEOUT_MS
         ) {
             fprintf(
                 stderr,
@@ -234,7 +235,7 @@ static int resolve_arp(
                 dev,
                 receive_buffer,
                 sizeof(receive_buffer),
-                250
+                TCP_POLL_MS
             );
 
         if (received < 0) {
@@ -245,20 +246,20 @@ static int resolve_arp(
             continue;
         }
 
-        ethernet_frame_t eth;
+        ethernet_frame_t ethernet;
 
         if (
             ethernet_parse(
                 receive_buffer,
                 (size_t)received,
-                &eth
+                &ethernet
             ) != 0
         ) {
             continue;
         }
 
         if (
-            eth.ethertype !=
+            ethernet.ethertype !=
             ETHERNET_TYPE_ARP
         ) {
             continue;
@@ -268,8 +269,8 @@ static int resolve_arp(
 
         if (
             arp_parse(
-                eth.payload,
-                eth.payload_len,
+                ethernet.payload,
+                ethernet.payload_len,
                 &reply
             ) != 0
         ) {
@@ -326,6 +327,15 @@ static int send_tcp_segment(
     const tcp_segment_t *tcp
 )
 {
+    if (
+        dev == NULL ||
+        target_ip == NULL ||
+        next_hop_mac == NULL ||
+        tcp == NULL
+    ) {
+        return -1;
+    }
+
     uint8_t tcp_bytes[
         ETHERNET_MAX_PAYLOAD
     ];
@@ -375,30 +385,30 @@ static int send_tcp_segment(
         return -1;
     }
 
-    ethernet_frame_t eth = {0};
+    ethernet_frame_t ethernet = {0};
 
     memcpy(
-        eth.destination,
+        ethernet.destination,
         next_hop_mac,
         ETHERNET_ADDR_LEN
     );
 
     memcpy(
-        eth.source,
+        ethernet.source,
         dev->mac,
         ETHERNET_ADDR_LEN
     );
 
-    eth.ethertype =
+    ethernet.ethertype =
         ETHERNET_TYPE_IPV4;
 
     memcpy(
-        eth.payload,
+        ethernet.payload,
         ip_bytes,
         ip_len
     );
 
-    eth.payload_len =
+    ethernet.payload_len =
         ip_len;
 
     uint8_t frame[
@@ -407,7 +417,7 @@ static int send_tcp_segment(
 
     size_t frame_len =
         ethernet_serialize(
-            &eth,
+            &ethernet,
             frame,
             sizeof(frame)
         );
@@ -464,8 +474,7 @@ static int receive_tcp_segment(
             elapsed_ms(
                 &start,
                 &now
-            ) >
-            timeout_ms
+            ) > timeout_ms
         ) {
             return 0;
         }
@@ -475,7 +484,7 @@ static int receive_tcp_segment(
                 dev,
                 receive_buffer,
                 sizeof(receive_buffer),
-                250
+                TCP_POLL_MS
             );
 
         if (received < 0) {
@@ -486,20 +495,20 @@ static int receive_tcp_segment(
             continue;
         }
 
-        ethernet_frame_t eth;
+        ethernet_frame_t ethernet;
 
         if (
             ethernet_parse(
                 receive_buffer,
                 (size_t)received,
-                &eth
+                &ethernet
             ) != 0
         ) {
             continue;
         }
 
         if (
-            eth.ethertype !=
+            ethernet.ethertype !=
             ETHERNET_TYPE_IPV4
         ) {
             continue;
@@ -509,8 +518,8 @@ static int receive_tcp_segment(
 
         if (
             ipv4_parse(
-                eth.payload,
-                eth.payload_len,
+                ethernet.payload,
+                ethernet.payload_len,
                 &ip
             ) != 0
         ) {
@@ -583,27 +592,20 @@ static int receive_tcp_segment(
     }
 }
 
-static int send_ack(
+static int send_connection_ack(
     netdev_t *dev,
     const uint8_t target_ip[IPV4_ADDR_LEN],
     const uint8_t next_hop_mac[ETHERNET_ADDR_LEN],
-    uint32_t seq,
-    uint32_t ack
+    const tcp_connection_t *connection
 )
 {
-    tcp_segment_t segment;
+    tcp_segment_t ack;
 
     if (
-        tcp_build(
-            &segment,
-            HTTP_SOURCE_PORT,
-            HTTP_DESTINATION_PORT,
-            seq,
-            ack,
-            TCP_FLAG_ACK,
-            TCP_WINDOW_SIZE,
-            NULL,
-            0
+        tcp_connection_build_ack(
+            connection,
+            &ack,
+            TCP_WINDOW_SIZE
         ) != 0
     ) {
         return -1;
@@ -613,7 +615,7 @@ static int send_ack(
         dev,
         target_ip,
         next_hop_mac,
-        &segment
+        &ack
     );
 }
 
@@ -649,7 +651,7 @@ static int append_response(
         data_len >
         HTTP_RESPONSE_MAX_SIZE -
         *length -
-        1
+        1U
     ) {
         return -1;
     }
@@ -657,7 +659,7 @@ static int append_response(
     size_t required =
         *length +
         data_len +
-        1;
+        1U;
 
     if (
         required >
@@ -679,12 +681,12 @@ static int append_response(
         ) {
             if (
                 new_capacity >=
-                HTTP_RESPONSE_MAX_SIZE / 2
+                HTTP_RESPONSE_MAX_SIZE / 2U
             ) {
                 new_capacity =
                     HTTP_RESPONSE_MAX_SIZE;
             } else {
-                new_capacity *= 2;
+                new_capacity *= 2U;
             }
 
             if (
@@ -738,13 +740,6 @@ static int print_http_response(
     size_t response_len
 )
 {
-    if (
-        response_data == NULL ||
-        response_len == 0
-    ) {
-        return -1;
-    }
-
     http_response_t response;
 
     if (
@@ -756,7 +751,7 @@ static int print_http_response(
     ) {
         fprintf(
             stderr,
-            "Received data but could not parse HTTP response.\n"
+            "Could not parse HTTP response.\n"
         );
 
         return -1;
@@ -769,11 +764,6 @@ static int print_http_response(
         );
 
     if (chunked < 0) {
-        fprintf(
-            stderr,
-            "Could not inspect HTTP transfer encoding.\n"
-        );
-
         return -1;
     }
 
@@ -786,10 +776,9 @@ static int print_http_response(
         response.header_len
     );
 
-    /*
-     * Print response headers exactly as received.
-     */
-    printf("\n--- HEADERS ---\n");
+    printf(
+        "\n--- HEADERS ---\n"
+    );
 
     fwrite(
         response_data,
@@ -799,21 +788,17 @@ static int print_http_response(
     );
 
     if (chunked) {
-        /*
-         * The decoded representation can never be larger
-         * than the raw chunked representation, plus the
-         * trailing NUL used for convenience.
-         */
         size_t decoded_capacity =
-            response.body_len + 1;
+            response.body_len +
+            1U;
 
-        char *decoded_body =
+        char *decoded =
             malloc(
                 decoded_capacity
             );
 
         if (
-            decoded_body ==
+            decoded ==
             NULL
         ) {
             return -1;
@@ -823,30 +808,20 @@ static int print_http_response(
             http_decode_chunked_body(
                 response.body,
                 response.body_len,
-                decoded_body,
+                decoded,
                 decoded_capacity
             );
 
-        /*
-         * A zero-length decoded body is ambiguous with the
-         * current decoder API. For our live HTTP GET use case,
-         * a nonempty raw body with zero decoded bytes indicates
-         * either an empty chunked response or a decode failure.
-         *
-         * Keep the output safe and informative either way.
-         */
         if (
             decoded_len == 0 &&
             response.body_len > 5
         ) {
             fprintf(
                 stderr,
-                "\nChunked body decoding failed.\n"
+                "Chunked body decoding failed.\n"
             );
 
-            free(
-                decoded_body
-            );
+            free(decoded);
 
             return -1;
         }
@@ -859,7 +834,7 @@ static int print_http_response(
             decoded_len > 0
         ) {
             fwrite(
-                decoded_body,
+                decoded,
                 1,
                 decoded_len,
                 stdout
@@ -867,23 +842,20 @@ static int print_http_response(
         }
 
         printf(
-            "\n\nraw body: %zu bytes"
-            "\ndecoded body: %zu bytes\n",
+            "\n\nraw body: %zu bytes\n"
+            "decoded body: %zu bytes\n",
             response.body_len,
             decoded_len
         );
 
-        free(
-            decoded_body
-        );
+        free(decoded);
     } else {
         printf(
             "\n--- BODY ---\n"
         );
 
         if (
-            response.body_len >
-            0
+            response.body_len > 0
         ) {
             fwrite(
                 response.body,
@@ -902,42 +874,31 @@ static int print_http_response(
     return 0;
 }
 
-static int run_http(
+static int connect_tcp(
     netdev_t *dev,
     const uint8_t target_ip[IPV4_ADDR_LEN],
     const uint8_t next_hop_mac[ETHERNET_ADDR_LEN],
-    const char *host,
-    const char *path
+    tcp_connection_t *connection
 )
 {
-    uint32_t client_isn =
-        generate_isn();
-
-    /*
-     * SYN
-     */
-
     tcp_segment_t syn;
 
     if (
-        tcp_build(
+        tcp_connection_build_syn(
+            connection,
             &syn,
-            HTTP_SOURCE_PORT,
-            HTTP_DESTINATION_PORT,
-            client_isn,
-            0,
-            TCP_FLAG_SYN,
-            TCP_WINDOW_SIZE,
-            NULL,
-            0
+            TCP_WINDOW_SIZE
         ) != 0
     ) {
         return -1;
     }
 
     printf(
-        "TCP  SYN seq=%u\n",
-        client_isn
+        "TCP  %-12s seq=%u\n",
+        tcp_connection_state_name(
+            connection->state
+        ),
+        syn.sequence_number
     );
 
     if (
@@ -951,98 +912,196 @@ static int run_http(
         return -1;
     }
 
-    /*
-     * SYN-ACK
-     */
-
-    tcp_segment_t syn_ack;
-
-    int receive_result =
-        receive_tcp_segment(
-            dev,
-            target_ip,
-            &syn_ack,
-            TCP_TIMEOUT_MS
-        );
+    struct timespec start;
 
     if (
-        receive_result != 1
-    ) {
-        fprintf(
-            stderr,
-            "No SYN-ACK received.\n"
-        );
-
-        return -1;
-    }
-
-    if (
-        (syn_ack.flags &
-        (
-            TCP_FLAG_SYN |
-            TCP_FLAG_ACK
-        )) !=
-        (
-            TCP_FLAG_SYN |
-            TCP_FLAG_ACK
-        )
-    ) {
-        fprintf(
-            stderr,
-            "Expected SYN-ACK.\n"
-        );
-
-        return -1;
-    }
-
-    if (
-        syn_ack
-            .acknowledgment_number !=
-        client_isn + 1U
-    ) {
-        fprintf(
-            stderr,
-            "Invalid SYN-ACK acknowledgment.\n"
-        );
-
-        return -1;
-    }
-
-    uint32_t client_seq =
-        client_isn + 1U;
-
-    uint32_t server_seq =
-        syn_ack.sequence_number +
-        1U;
-
-    printf(
-        "TCP  SYN-ACK seq=%u ack=%u\n",
-        syn_ack.sequence_number,
-        syn_ack.acknowledgment_number
-    );
-
-    /*
-     * Complete three-way handshake.
-     */
-
-    if (
-        send_ack(
-            dev,
-            target_ip,
-            next_hop_mac,
-            client_seq,
-            server_seq
+        clock_gettime(
+            CLOCK_MONOTONIC,
+            &start
         ) != 0
     ) {
         return -1;
     }
 
-    printf(
-        "TCP  ESTABLISHED\n"
+    for (;;) {
+        struct timespec now;
+
+        if (
+            clock_gettime(
+                CLOCK_MONOTONIC,
+                &now
+            ) != 0
+        ) {
+            return -1;
+        }
+
+        if (
+            elapsed_ms(
+                &start,
+                &now
+            ) >
+            TCP_CONNECT_TIMEOUT_MS
+        ) {
+            fprintf(
+                stderr,
+                "TCP connection timed out.\n"
+            );
+
+            return -1;
+        }
+
+        tcp_segment_t incoming;
+
+        int result =
+            receive_tcp_segment(
+                dev,
+                target_ip,
+                &incoming,
+                TCP_POLL_MS
+            );
+
+        if (
+            result < 0
+        ) {
+            return -1;
+        }
+
+        if (
+            result == 1
+        ) {
+            int state_result =
+                tcp_connection_on_segment(
+                    connection,
+                    &incoming
+                );
+
+            if (
+                state_result < 0
+            ) {
+                continue;
+            }
+
+            if (
+                connection->state ==
+                TCP_STATE_RESET
+            ) {
+                fprintf(
+                    stderr,
+                    "TCP connection reset.\n"
+                );
+
+                return -1;
+            }
+
+            if (
+                connection->state ==
+                TCP_STATE_ESTABLISHED
+            ) {
+                printf(
+                    "TCP  SYN-ACK      seq=%u ack=%u\n",
+                    incoming.sequence_number,
+                    incoming.acknowledgment_number
+                );
+
+                if (
+                    send_connection_ack(
+                        dev,
+                        target_ip,
+                        next_hop_mac,
+                        connection
+                    ) != 0
+                ) {
+                    return -1;
+                }
+
+                printf(
+                    "TCP  STATE        %s\n",
+                    tcp_connection_state_name(
+                        connection->state
+                    )
+                );
+
+                return 0;
+            }
+        }
+
+        tcp_segment_t retransmit;
+
+        int retransmit_result =
+            tcp_connection_tick(
+                connection,
+                TCP_POLL_MS,
+                &retransmit
+            );
+
+        if (
+            retransmit_result < 0
+        ) {
+            fprintf(
+                stderr,
+                "TCP retransmission limit reached.\n"
+            );
+
+            return -1;
+        }
+
+        if (
+            retransmit_result == 1
+        ) {
+            printf(
+                "TCP  RETRANSMIT    %s seq=%u retry=%u rto=%u ms\n",
+                tcp_state_flag_name(
+                    retransmit.flags
+                ),
+                retransmit.sequence_number,
+                connection->retransmit_count,
+                connection->retransmit_timeout_ms
+            );
+
+            if (
+                send_tcp_segment(
+                    dev,
+                    target_ip,
+                    next_hop_mac,
+                    &retransmit
+                ) != 0
+            ) {
+                return -1;
+            }
+        }
+    }
+}
+
+static int run_http(
+    netdev_t *dev,
+    const uint8_t target_ip[IPV4_ADDR_LEN],
+    const uint8_t next_hop_mac[ETHERNET_ADDR_LEN],
+    const char *host,
+    const char *path
+)
+{
+    tcp_connection_t connection;
+
+    tcp_connection_init(
+        &connection,
+        HTTP_SOURCE_PORT,
+        HTTP_DESTINATION_PORT,
+        generate_isn()
     );
 
+    if (
+        connect_tcp(
+            dev,
+            target_ip,
+            next_hop_mac,
+            &connection
+        ) != 0
+    ) {
+        return -1;
+    }
+
     /*
-     * Build HTTP GET request.
+     * HTTP request construction.
      */
 
     char request[
@@ -1066,17 +1125,12 @@ static int run_http(
     tcp_segment_t request_segment;
 
     if (
-        tcp_build(
+        tcp_connection_build_data(
+            &connection,
             &request_segment,
-            HTTP_SOURCE_PORT,
-            HTTP_DESTINATION_PORT,
-            client_seq,
-            server_seq,
-            TCP_FLAG_PSH |
-            TCP_FLAG_ACK,
-            TCP_WINDOW_SIZE,
             (const uint8_t *)request,
-            request_len
+            request_len,
+            TCP_WINDOW_SIZE
         ) != 0
     ) {
         return -1;
@@ -1085,6 +1139,13 @@ static int run_http(
     printf(
         "HTTP GET %s\n",
         path
+    );
+
+    printf(
+        "TCP  SEND         seq=%u bytes=%zu ack=%u\n",
+        request_segment.sequence_number,
+        request_len,
+        request_segment.acknowledgment_number
     );
 
     if (
@@ -1097,18 +1158,6 @@ static int run_http(
     ) {
         return -1;
     }
-
-    /*
-     * TCP sequence advances by number of payload bytes sent.
-     */
-
-    client_seq +=
-        (uint32_t)
-        request_len;
-
-    /*
-     * Response accumulation buffer.
-     */
 
     size_t response_capacity =
         HTTP_RESPONSE_INITIAL_CAPACITY;
@@ -1131,9 +1180,6 @@ static int run_http(
     size_t response_len =
         0;
 
-    int received_fin =
-        0;
-
     struct timespec start;
 
     if (
@@ -1142,15 +1188,16 @@ static int run_http(
             &start
         ) != 0
     ) {
-        free(
-            response_data
-        );
+        free(response_data);
 
         return -1;
     }
 
+    int remote_closed =
+        0;
+
     while (
-        !received_fin
+        !remote_closed
     ) {
         struct timespec now;
 
@@ -1160,9 +1207,7 @@ static int run_http(
                 &now
             ) != 0
         ) {
-            free(
-                response_data
-            );
+            free(response_data);
 
             return -1;
         }
@@ -1184,27 +1229,80 @@ static int run_http(
 
         tcp_segment_t incoming;
 
-        int result =
+        int receive_result =
             receive_tcp_segment(
                 dev,
                 target_ip,
                 &incoming,
-                1000
+                TCP_POLL_MS
             );
 
         if (
-            result < 0
+            receive_result < 0
         ) {
-            free(
-                response_data
-            );
+            free(response_data);
 
             return -1;
         }
 
         if (
-            result == 0
+            receive_result == 0
         ) {
+            /*
+             * No packet arrived.
+             *
+             * Let the reusable TCP engine decide whether
+             * outstanding SYN/data/FIN needs retransmission.
+             */
+
+            tcp_segment_t retransmit;
+
+            int retransmit_result =
+                tcp_connection_tick(
+                    &connection,
+                    TCP_POLL_MS,
+                    &retransmit
+                );
+
+            if (
+                retransmit_result < 0
+            ) {
+                fprintf(
+                    stderr,
+                    "TCP retransmission limit reached.\n"
+                );
+
+                free(response_data);
+
+                return -1;
+            }
+
+            if (
+                retransmit_result == 1
+            ) {
+                printf(
+                    "TCP  RETRANSMIT    %s seq=%u retry=%u\n",
+                    tcp_state_flag_name(
+                        retransmit.flags
+                    ),
+                    retransmit.sequence_number,
+                    connection.retransmit_count
+                );
+
+                if (
+                    send_tcp_segment(
+                        dev,
+                        target_ip,
+                        next_hop_mac,
+                        &retransmit
+                    ) != 0
+                ) {
+                    free(response_data);
+
+                    return -1;
+                }
+            }
+
             continue;
         }
 
@@ -1212,56 +1310,69 @@ static int run_http(
             (incoming.flags &
             TCP_FLAG_RST) != 0
         ) {
-            fprintf(
-                stderr,
-                "Connection reset.\n"
+            (void)tcp_connection_on_segment(
+                &connection,
+                &incoming
             );
 
-            free(
-                response_data
+            fprintf(
+                stderr,
+                "TCP connection reset.\n"
             );
+
+            free(response_data);
 
             return -1;
         }
 
         /*
-         * Reject impossible acknowledgements.
+         * Save the receive edge before the state machine
+         * processes this segment.
+         *
+         * That lets the application know whether this
+         * payload was contiguous, duplicate, or ahead of us.
          */
+
+        uint32_t expected_before =
+            connection.receive_next;
+
+        uint32_t segment_start =
+            incoming.sequence_number;
+
+        uint32_t segment_end =
+            segment_start +
+            (uint32_t)
+            incoming.payload_len;
+
+        tcp_connection_state_t state_before =
+            connection.state;
+
+        int state_result =
+            tcp_connection_on_segment(
+                &connection,
+                &incoming
+            );
 
         if (
-            (incoming.flags &
-            TCP_FLAG_ACK) != 0 &&
-            incoming
-                .acknowledgment_number >
-            client_seq
+            state_result < 0
         ) {
+            /*
+             * Wrong/invalid segment for this connection.
+             */
             continue;
         }
-
-        /*
-         * TCP payload handling.
-         */
 
         if (
             incoming.payload_len >
             0
         ) {
-            uint32_t segment_start =
-                incoming
-                    .sequence_number;
-
-            uint32_t segment_end =
-                segment_start +
-                (uint32_t)
-                incoming
-                    .payload_len;
-
             if (
                 segment_start ==
-                server_seq
+                expected_before
             ) {
                 /*
-                 * Next contiguous data.
+                 * The state machine advanced receive_next,
+                 * so this payload was contiguous.
                  */
 
                 if (
@@ -1278,149 +1389,118 @@ static int run_http(
                         "HTTP response too large.\n"
                     );
 
-                    free(
-                        response_data
-                    );
+                    free(response_data);
 
                     return -1;
                 }
 
-                server_seq =
-                    segment_end;
-
                 printf(
-                    "TCP  DATA seq=%u bytes=%zu total=%zu ack=%u\n",
+                    "TCP  DATA         seq=%u bytes=%zu total=%zu ack=%u\n",
                     segment_start,
                     incoming.payload_len,
                     response_len,
-                    server_seq
+                    connection.receive_next
                 );
             } else if (
                 segment_end <=
-                server_seq
+                expected_before
             ) {
-                /*
-                 * Fully duplicate/retransmitted segment.
-                 */
-
                 printf(
-                    "TCP  DUPLICATE seq=%u bytes=%zu ack=%u\n",
+                    "TCP  DUPLICATE    seq=%u bytes=%zu ack=%u\n",
                     segment_start,
                     incoming.payload_len,
-                    server_seq
+                    connection.receive_next
                 );
             } else {
-                /*
-                 * Future segment with a gap.
-                 *
-                 * Do not consume it yet.
-                 */
-
                 printf(
                     "TCP  OUT-OF-ORDER seq=%u expected=%u bytes=%zu\n",
                     segment_start,
-                    server_seq,
+                    expected_before,
                     incoming.payload_len
                 );
             }
 
             /*
-             * ACK highest contiguous server sequence.
+             * ACK the highest contiguous sequence number
+             * known to tcp_connection_t.
              */
 
             if (
-                send_ack(
+                send_connection_ack(
                     dev,
                     target_ip,
                     next_hop_mac,
-                    client_seq,
-                    server_seq
+                    &connection
                 ) != 0
             ) {
-                free(
-                    response_data
-                );
+                free(response_data);
 
                 return -1;
             }
         }
 
         /*
-         * FIN handling.
+         * A FIN may have moved the connection from
+         * ESTABLISHED -> CLOSE-WAIT.
          */
 
         if (
+            state_before !=
+                TCP_STATE_CLOSE_WAIT &&
+            connection.state ==
+                TCP_STATE_CLOSE_WAIT
+        ) {
+            printf(
+                "TCP  FIN RECEIVED  ack=%u state=%s\n",
+                connection.receive_next,
+                tcp_connection_state_name(
+                    connection.state
+                )
+            );
+
+            if (
+                send_connection_ack(
+                    dev,
+                    target_ip,
+                    next_hop_mac,
+                    &connection
+                ) != 0
+            ) {
+                free(response_data);
+
+                return -1;
+            }
+
+            remote_closed =
+                1;
+        } else if (
             (incoming.flags &
             TCP_FLAG_FIN) != 0
         ) {
-            uint32_t fin_sequence =
-                incoming
-                    .sequence_number +
+            /*
+             * FIN was seen but could not be consumed because
+             * bytes before it are missing.
+             */
+
+            printf(
+                "TCP  FIN PENDING   seq=%u expected=%u\n",
+                incoming.sequence_number +
                 (uint32_t)
-                incoming
-                    .payload_len;
+                incoming.payload_len,
+                connection.receive_next
+            );
 
             if (
-                fin_sequence ==
-                server_seq
+                send_connection_ack(
+                    dev,
+                    target_ip,
+                    next_hop_mac,
+                    &connection
+                ) != 0
             ) {
-                /*
-                 * FIN consumes one sequence number.
-                 */
+                free(response_data);
 
-                server_seq++;
-
-                if (
-                    send_ack(
-                        dev,
-                        target_ip,
-                        next_hop_mac,
-                        client_seq,
-                        server_seq
-                    ) != 0
-                ) {
-                    free(
-                        response_data
-                    );
-
-                    return -1;
-                }
-
-                printf(
-                    "TCP  FIN received ack=%u\n",
-                    server_seq
-                );
-
-                received_fin =
-                    1;
-            } else {
-                /*
-                 * FIN came before missing data.
-                 *
-                 * ACK our current contiguous edge and keep waiting.
-                 */
-
-                printf(
-                    "TCP  FIN out-of-order seq=%u expected=%u\n",
-                    fin_sequence,
-                    server_seq
-                );
-
-                if (
-                    send_ack(
-                        dev,
-                        target_ip,
-                        next_hop_mac,
-                        client_seq,
-                        server_seq
-                    ) != 0
-                ) {
-                    free(
-                        response_data
-                    );
-
-                    return -1;
-                }
+                return -1;
             }
         }
     }
@@ -1433,72 +1513,64 @@ static int run_http(
             "No HTTP response data received.\n"
         );
 
-        free(
-            response_data
-        );
+        free(response_data);
 
         return -1;
     }
 
-    /*
-     * Parse + display HTTP response.
-     */
-
-    int print_result =
+    if (
         print_http_response(
             response_data,
             response_len
-        );
-
-    if (
-        print_result != 0
+        ) != 0
     ) {
-        free(
-            response_data
-        );
+        free(response_data);
 
         return -1;
     }
 
     /*
-     * Send our FIN.
+     * Server performed active close:
+     *
+     * ESTABLISHED -> CLOSE-WAIT
+     *
+     * Now we send our FIN:
+     *
+     * CLOSE-WAIT -> LAST-ACK
      */
 
-    tcp_segment_t fin;
-
     if (
-        tcp_build(
-            &fin,
-            HTTP_SOURCE_PORT,
-            HTTP_DESTINATION_PORT,
-            client_seq,
-            server_seq,
-            TCP_FLAG_FIN |
-            TCP_FLAG_ACK,
-            TCP_WINDOW_SIZE,
-            NULL,
-            0
-        ) == 0
+        connection.state ==
+        TCP_STATE_CLOSE_WAIT
     ) {
+        tcp_segment_t fin;
+
         if (
-            send_tcp_segment(
+            tcp_connection_build_fin(
+                &connection,
+                &fin,
+                TCP_WINDOW_SIZE
+            ) == 0
+        ) {
+            printf(
+                "\nTCP  FIN SEND     seq=%u ack=%u state=%s\n",
+                fin.sequence_number,
+                fin.acknowledgment_number,
+                tcp_connection_state_name(
+                    connection.state
+                )
+            );
+
+            (void)send_tcp_segment(
                 dev,
                 target_ip,
                 next_hop_mac,
                 &fin
-            ) == 0
-        ) {
-            printf(
-                "\nTCP  FIN sent seq=%u ack=%u\n",
-                client_seq,
-                server_seq
             );
         }
     }
 
-    free(
-        response_data
-    );
+    free(response_data);
 
     return 0;
 }
