@@ -13,10 +13,13 @@
 #include <time.h>
 
 #define RECEIVE_BUFFER_SIZE 2048
-#define ARP_TIMEOUT_MS 3000
-#define ICMP_TIMEOUT_MS 3000
 
-static void print_mac(const uint8_t mac[6])
+#define ARP_TIMEOUT_MS 3000
+#define ICMP_TIMEOUT_MS 5000
+
+static void print_mac(
+    const uint8_t mac[ETHERNET_ADDR_LEN]
+)
 {
     printf(
         "%02X:%02X:%02X:%02X:%02X:%02X",
@@ -29,7 +32,9 @@ static void print_mac(const uint8_t mac[6])
     );
 }
 
-static void print_ipv4(const uint8_t ip[4])
+static void print_ipv4(
+    const uint8_t ip[IPV4_ADDR_LEN]
+)
 {
     printf(
         "%u.%u.%u.%u",
@@ -46,10 +51,16 @@ static double elapsed_ms(
 )
 {
     double seconds =
-        (double)(end->tv_sec - start->tv_sec);
+        (double)(
+            end->tv_sec -
+            start->tv_sec
+        );
 
     double nanoseconds =
-        (double)(end->tv_nsec - start->tv_nsec);
+        (double)(
+            end->tv_nsec -
+            start->tv_nsec
+        );
 
     return
         (seconds * 1000.0) +
@@ -58,8 +69,8 @@ static double elapsed_ms(
 
 static int resolve_arp(
     netdev_t *dev,
-    const uint8_t target_ip[4],
-    uint8_t target_mac[6]
+    const uint8_t next_hop_ip[IPV4_ADDR_LEN],
+    uint8_t next_hop_mac[ETHERNET_ADDR_LEN]
 )
 {
     arp_packet_t arp_request;
@@ -69,7 +80,7 @@ static int resolve_arp(
             &arp_request,
             dev->mac,
             dev->ipv4,
-            target_ip
+            next_hop_ip
         ) != 0
     ) {
         fprintf(
@@ -123,7 +134,9 @@ static int resolve_arp(
     ethernet.payload_len =
         arp_len;
 
-    uint8_t frame_bytes[ETHERNET_MAX_FRAME_LEN];
+    uint8_t frame_bytes[
+        ETHERNET_MAX_FRAME_LEN
+    ];
 
     size_t frame_len = ethernet_serialize(
         &ethernet,
@@ -134,7 +147,7 @@ static int resolve_arp(
     if (frame_len == 0) {
         fprintf(
             stderr,
-            "Failed to serialize Ethernet ARP frame.\n"
+            "Failed to serialize ARP frame.\n"
         );
 
         return -1;
@@ -149,17 +162,15 @@ static int resolve_arp(
     ) {
         fprintf(
             stderr,
-            "Failed to send ARP frame.\n"
+            "Failed to transmit ARP request.\n"
         );
 
         return -1;
     }
 
     printf("ARP  who-has ");
-    print_ipv4(target_ip);
+    print_ipv4(next_hop_ip);
     printf("\n");
-
-    uint8_t receive_buffer[RECEIVE_BUFFER_SIZE];
 
     struct timespec start;
 
@@ -169,9 +180,12 @@ static int resolve_arp(
             &start
         ) != 0
     ) {
-        perror("clock_gettime");
         return -1;
     }
+
+    uint8_t receive_buffer[
+        RECEIVE_BUFFER_SIZE
+    ];
 
     for (;;) {
         struct timespec now;
@@ -182,7 +196,6 @@ static int resolve_arp(
                 &now
             ) != 0
         ) {
-            perror("clock_gettime");
             return -1;
         }
 
@@ -207,16 +220,7 @@ static int resolve_arp(
             250
         );
 
-        if (received < 0) {
-            fprintf(
-                stderr,
-                "Error receiving ARP reply.\n"
-            );
-
-            return -1;
-        }
-
-        if (received == 0) {
+        if (received <= 0) {
             continue;
         }
 
@@ -239,20 +243,20 @@ static int resolve_arp(
             continue;
         }
 
-        arp_packet_t arp_reply;
+        arp_packet_t reply;
 
         if (
             arp_parse(
                 incoming.payload,
                 incoming.payload_len,
-                &arp_reply
+                &reply
             ) != 0
         ) {
             continue;
         }
 
         if (
-            arp_reply.opcode !=
+            reply.opcode !=
             ARP_OPCODE_REPLY
         ) {
             continue;
@@ -260,8 +264,8 @@ static int resolve_arp(
 
         if (
             memcmp(
-                arp_reply.sender_ip,
-                target_ip,
+                reply.sender_ip,
+                next_hop_ip,
                 IPV4_ADDR_LEN
             ) != 0
         ) {
@@ -270,7 +274,7 @@ static int resolve_arp(
 
         if (
             memcmp(
-                arp_reply.target_ip,
+                reply.target_ip,
                 dev->ipv4,
                 IPV4_ADDR_LEN
             ) != 0
@@ -279,15 +283,18 @@ static int resolve_arp(
         }
 
         memcpy(
-            target_mac,
-            arp_reply.sender_mac,
+            next_hop_mac,
+            reply.sender_mac,
             ETHERNET_ADDR_LEN
         );
 
         printf("ARP  ");
-        print_ipv4(target_ip);
+        print_ipv4(next_hop_ip);
+
         printf(" is-at ");
-        print_mac(target_mac);
+
+        print_mac(next_hop_mac);
+
         printf("\n");
 
         return 0;
@@ -296,8 +303,8 @@ static int resolve_arp(
 
 static int send_ping(
     netdev_t *dev,
-    const uint8_t target_ip[4],
-    const uint8_t target_mac[6]
+    const uint8_t target_ip[IPV4_ADDR_LEN],
+    const uint8_t next_hop_mac[ETHERNET_ADDR_LEN]
 )
 {
     static const uint8_t payload[] =
@@ -308,6 +315,10 @@ static int send_ping(
 
     const uint16_t sequence =
         1;
+
+    /*
+     * ICMP
+     */
 
     icmp_packet_t icmp;
 
@@ -320,15 +331,12 @@ static int send_ping(
             sizeof(payload) - 1
         ) != 0
     ) {
-        fprintf(
-            stderr,
-            "Failed to build ICMP request.\n"
-        );
-
         return -1;
     }
 
-    uint8_t icmp_bytes[ICMP_MAX_PACKET_LEN];
+    uint8_t icmp_bytes[
+        ICMP_MAX_PACKET_LEN
+    ];
 
     size_t icmp_len = icmp_serialize(
         &icmp,
@@ -337,13 +345,13 @@ static int send_ping(
     );
 
     if (icmp_len == 0) {
-        fprintf(
-            stderr,
-            "Failed to serialize ICMP packet.\n"
-        );
-
         return -1;
     }
+
+    /*
+     * IPv4 destination remains the real target,
+     * even when Ethernet goes to a gateway.
+     */
 
     ipv4_packet_t ipv4;
 
@@ -359,15 +367,12 @@ static int send_ping(
             0x1337
         ) != 0
     ) {
-        fprintf(
-            stderr,
-            "Failed to build IPv4 packet.\n"
-        );
-
         return -1;
     }
 
-    uint8_t ipv4_bytes[ETHERNET_MAX_PAYLOAD];
+    uint8_t ipv4_bytes[
+        ETHERNET_MAX_PAYLOAD
+    ];
 
     size_t ipv4_len = ipv4_serialize(
         &ipv4,
@@ -376,19 +381,24 @@ static int send_ping(
     );
 
     if (ipv4_len == 0) {
-        fprintf(
-            stderr,
-            "Failed to serialize IPv4 packet.\n"
-        );
-
         return -1;
     }
+
+    /*
+     * Ethernet destination is the next hop.
+     *
+     * Local host:
+     *   next_hop_mac = target MAC
+     *
+     * Remote host:
+     *   next_hop_mac = gateway MAC
+     */
 
     ethernet_frame_t ethernet = {0};
 
     memcpy(
         ethernet.destination,
-        target_mac,
+        next_hop_mac,
         ETHERNET_ADDR_LEN
     );
 
@@ -410,7 +420,9 @@ static int send_ping(
     ethernet.payload_len =
         ipv4_len;
 
-    uint8_t frame_bytes[ETHERNET_MAX_FRAME_LEN];
+    uint8_t frame_bytes[
+        ETHERNET_MAX_FRAME_LEN
+    ];
 
     size_t frame_len = ethernet_serialize(
         &ethernet,
@@ -419,11 +431,6 @@ static int send_ping(
     );
 
     if (frame_len == 0) {
-        fprintf(
-            stderr,
-            "Failed to serialize Ethernet frame.\n"
-        );
-
         return -1;
     }
 
@@ -435,7 +442,6 @@ static int send_ping(
             &start
         ) != 0
     ) {
-        perror("clock_gettime");
         return -1;
     }
 
@@ -446,11 +452,6 @@ static int send_ping(
             frame_len
         ) < 0
     ) {
-        fprintf(
-            stderr,
-            "Failed to send ICMP frame.\n"
-        );
-
         return -1;
     }
 
@@ -460,7 +461,9 @@ static int send_ping(
         (unsigned int)sequence
     );
 
-    uint8_t receive_buffer[RECEIVE_BUFFER_SIZE];
+    uint8_t receive_buffer[
+        RECEIVE_BUFFER_SIZE
+    ];
 
     for (;;) {
         struct timespec now;
@@ -471,7 +474,6 @@ static int send_ping(
                 &now
             ) != 0
         ) {
-            perror("clock_gettime");
             return -1;
         }
 
@@ -496,16 +498,7 @@ static int send_ping(
             250
         );
 
-        if (received < 0) {
-            fprintf(
-                stderr,
-                "Error receiving ICMP reply.\n"
-            );
-
-            return -1;
-        }
-
-        if (received == 0) {
+        if (received <= 0) {
             continue;
         }
 
@@ -601,11 +594,11 @@ static int send_ping(
                 &end
             ) != 0
         ) {
-            perror("clock_gettime");
             return -1;
         }
 
         printf("ICMP echo reply from ");
+
         print_ipv4(target_ip);
 
         printf(
@@ -661,7 +654,9 @@ int main(
         return 1;
     }
 
-    uint8_t target_ip[IPV4_ADDR_LEN];
+    uint8_t target_ip[
+        IPV4_ADDR_LEN
+    ];
 
     memcpy(
         target_ip,
@@ -703,44 +698,84 @@ int main(
     print_ipv4(dev.ipv4);
     printf("\n");
 
+    printf("netmask: ");
+    print_ipv4(dev.netmask);
+    printf("\n");
+
+    if (dev.has_gateway) {
+        printf("gateway: ");
+        print_ipv4(dev.gateway);
+        printf("\n");
+    }
+
     printf("target: ");
     print_ipv4(target_ip);
-    printf("\n\n");
+    printf("\n");
+
+    uint8_t next_hop_ip[
+        IPV4_ADDR_LEN
+    ];
 
     if (
-        !netdev_ipv4_is_local(
+        netdev_ipv4_is_local(
             &dev,
             target_ip
         )
     ) {
-        fprintf(
-            stderr,
-            "Target is not on the local subnet.\n"
-            "Gateway routing is not implemented yet.\n"
+        memcpy(
+            next_hop_ip,
+            target_ip,
+            IPV4_ADDR_LEN
         );
 
-        netdev_close(&dev);
+        printf(
+            "route: direct\n\n"
+        );
+    } else {
+        if (!dev.has_gateway) {
+            fprintf(
+                stderr,
+                "\nNo default gateway found.\n"
+            );
 
-        return 1;
+            netdev_close(&dev);
+
+            return 1;
+        }
+
+        memcpy(
+            next_hop_ip,
+            dev.gateway,
+            IPV4_ADDR_LEN
+        );
+
+        printf("route: via ");
+
+        print_ipv4(dev.gateway);
+
+        printf("\n\n");
     }
 
-    uint8_t target_mac[ETHERNET_ADDR_LEN];
+    uint8_t next_hop_mac[
+        ETHERNET_ADDR_LEN
+    ];
 
     if (
         resolve_arp(
             &dev,
-            target_ip,
-            target_mac
+            next_hop_ip,
+            next_hop_mac
         ) != 0
     ) {
         netdev_close(&dev);
+
         return 1;
     }
 
     int result = send_ping(
         &dev,
         target_ip,
-        target_mac
+        next_hop_mac
     );
 
     netdev_close(&dev);

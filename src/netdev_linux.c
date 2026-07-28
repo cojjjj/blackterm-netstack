@@ -10,6 +10,7 @@
 #include <netinet/in.h>
 #include <poll.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/socket.h>
@@ -50,14 +51,6 @@ static int get_interface_mac(
     uint8_t mac[NETDEV_MAC_LEN]
 )
 {
-    if (
-        fd < 0 ||
-        name == NULL ||
-        mac == NULL
-    ) {
-        return -1;
-    }
-
     struct ifreq ifr;
 
     if (
@@ -94,14 +87,6 @@ static int get_interface_ipv4(
     uint8_t ipv4[NETDEV_IPV4_LEN]
 )
 {
-    if (
-        fd < 0 ||
-        name == NULL ||
-        ipv4 == NULL
-    ) {
-        return -1;
-    }
-
     struct ifreq ifr;
 
     if (
@@ -143,14 +128,6 @@ static int get_interface_netmask(
     uint8_t netmask[NETDEV_IPV4_LEN]
 )
 {
-    if (
-        fd < 0 ||
-        name == NULL ||
-        netmask == NULL
-    ) {
-        return -1;
-    }
-
     struct ifreq ifr;
 
     if (
@@ -186,6 +163,148 @@ static int get_interface_netmask(
     return 0;
 }
 
+/*
+ * Linux exposes the IPv4 route table through /proc/net/route.
+ *
+ * Example:
+ *
+ * Iface Destination Gateway  Flags ...
+ * eno1  00000000    0132A8C0 0003  ...
+ *
+ * Destination 00000000 means default route.
+ *
+ * The gateway value is represented in the kernel's little-endian
+ * IPv4 form, so 0132A8C0 becomes:
+ *
+ * C0 A8 32 01
+ *
+ * = 192.168.50.1
+ */
+static int get_default_gateway(
+    const char *interface_name,
+    uint8_t gateway[NETDEV_IPV4_LEN]
+)
+{
+    if (
+        interface_name == NULL ||
+        gateway == NULL
+    ) {
+        return -1;
+    }
+
+    FILE *file = fopen(
+        "/proc/net/route",
+        "r"
+    );
+
+    if (file == NULL) {
+        return -1;
+    }
+
+    char line[512];
+
+    /*
+     * Skip header.
+     */
+    if (
+        fgets(
+            line,
+            sizeof(line),
+            file
+        ) == NULL
+    ) {
+        fclose(file);
+        return -1;
+    }
+
+    while (
+        fgets(
+            line,
+            sizeof(line),
+            file
+        ) != NULL
+    ) {
+        char iface[IF_NAMESIZE];
+
+        unsigned long destination;
+        unsigned long gateway_value;
+        unsigned int flags;
+
+        int fields = sscanf(
+            line,
+            "%15s %lx %lx %X",
+            iface,
+            &destination,
+            &gateway_value,
+            &flags
+        );
+
+        if (fields != 4) {
+            continue;
+        }
+
+        if (
+            strcmp(
+                iface,
+                interface_name
+            ) != 0
+        ) {
+            continue;
+        }
+
+        /*
+         * Default route.
+         */
+        if (destination != 0) {
+            continue;
+        }
+
+        /*
+         * Route must be UP and use a gateway.
+         *
+         * RTF_UP      = 0x0001
+         * RTF_GATEWAY = 0x0002
+         */
+        if (
+            (flags & 0x0001U) == 0 ||
+            (flags & 0x0002U) == 0
+        ) {
+            continue;
+        }
+
+        gateway[0] =
+            (uint8_t)(
+                gateway_value & 0xFFUL
+            );
+
+        gateway[1] =
+            (uint8_t)(
+                (gateway_value >> 8) &
+                0xFFUL
+            );
+
+        gateway[2] =
+            (uint8_t)(
+                (gateway_value >> 16) &
+                0xFFUL
+            );
+
+        gateway[3] =
+            (uint8_t)(
+                (gateway_value >> 24) &
+                0xFFUL
+            );
+
+        fclose(file);
+
+        return 0;
+    }
+
+    fclose(file);
+
+    return -1;
+}
+
 int netdev_open(
     netdev_t *dev,
     const char *interface_name
@@ -216,6 +335,7 @@ int netdev_open(
     );
 
     dev->fd = -1;
+    dev->has_gateway = 0;
 
     int fd = socket(
         AF_PACKET,
@@ -239,6 +359,7 @@ int netdev_open(
         );
 
         close(fd);
+
         return -1;
     }
 
@@ -269,6 +390,7 @@ int netdev_open(
         perror("bind(AF_PACKET)");
 
         close(fd);
+
         return -1;
     }
 
@@ -294,6 +416,7 @@ int netdev_open(
         perror("SIOCGIFHWADDR");
 
         netdev_close(dev);
+
         return -1;
     }
 
@@ -307,6 +430,7 @@ int netdev_open(
         perror("SIOCGIFADDR");
 
         netdev_close(dev);
+
         return -1;
     }
 
@@ -320,7 +444,17 @@ int netdev_open(
         perror("SIOCGIFNETMASK");
 
         netdev_close(dev);
+
         return -1;
+    }
+
+    if (
+        get_default_gateway(
+            interface_name,
+            dev->gateway
+        ) == 0
+    ) {
+        dev->has_gateway = 1;
     }
 
     return 0;
@@ -364,6 +498,7 @@ long netdev_send(
 
     if (sent < 0) {
         perror("send");
+
         return -1;
     }
 
@@ -419,6 +554,7 @@ long netdev_receive(
 
     if (poll_result < 0) {
         perror("poll");
+
         return -1;
     }
 
@@ -437,6 +573,7 @@ long netdev_receive(
 
     if (received < 0) {
         perror("recv");
+
         return -1;
     }
 
